@@ -1,0 +1,184 @@
+---
+title: "MachineLearningProj"
+author: "RoxyD"
+date: "12/11/2014"
+output: html_document
+---
+I read in training and testing data files for multiclass classification problem. I partitioned the data into two subsets for training (75%) and testing(25%). By leaving out part of the training set for testing I would be able to estimate OOB error and also use it for variable selection if necessary.)
+```{r, echo = FALSE}
+library(caret)
+library(corrplot)
+library(pROC)
+set.seed(61465)
+```
+
+```{r}
+pmlTraining<-read.csv("~/Downloads/pml-training.csv")
+pmlTesting<-read.csv("~/Downloads/pml-training.csv")
+trainingIndex<-createDataPartition(pmlTraining$classe, p = .75, list = FALSE)
+training<-pmlTraining[trainingIndex,]
+testing<-pmlTraining[-trainingIndex,]
+
+```
+I prepared the training subset of the training data for analysis by various models by 1) removing columns of meta-data on which I did not want to train, 2) removing predictors with very little variance, 3) removing predictors comprised primarily of missing data, 4) removing highly correlated variables
+
+Step 1: Remove columns of metadata (row number, date, time etc.)
+```{r}
+firstCutTraining<-training[,-(1:7)]
+```
+Step 2: Remove predictors with little or no variance 
+``` {r}
+nzv = nearZeroVar(firstCutTraining, freqCut = 95/5, uniqueCut = 10, saveMetrics = FALSE)
+secondCutTraining = firstCutTraining[-nzv]
+```
+Step 3 Remove predictors comprised primarily of missing data (there is probably a slick way to do this but I am using R for the first time...)
+``` {r}
+pctMissing = NULL
+numCols = length(secondCutTraining[1,])
+numRows = length(secondCutTraining[,1])
+for (j in 1:numCols)
+{ 
+  count = 0
+  for (i in 1:length(secondCutTraining[,j]))
+  {
+     count = count + is.na( secondCutTraining[i,j])
+  }
+  pctMissing[j] = count/numRows;
+} 
+thirdCutTraining<-secondCutTraining[, pctMissing <.95]
+```
+The percent missing is shown for each predictor. For several variables the percent missing is greater than 97%. This step eliminates those predictors.
+```{r}
+pctMissing
+```
+Step 4: Remove highly correlated variables
+``` {r}
+numCols = length(thirdCutTraining[1,]) 
+correlationMatrix <- cor(thirdCutTraining[,1:numCols -1], use="pairwise.complete.obs")
+```
+
+Although it is hard to read variable names, you can see many symetric areas (not exactly on the diagonal) that are dark blue and dark red indication predictors are highly (postively or negatively) correlated:
+
+```{r,echo= FALSE}
+corrplot(correlationMatrix, order = "hclust")
+```
+
+Now we remove variables to reduce high correlation among variables:
+
+```{r}
+highlyCorrelated <- findCorrelation(correlationMatrix, 0.70)
+fourthCutTraining = thirdCutTraining[-highlyCorrelated]
+dim(fourthCutTraining)
+correlationMatrixClean <-cor(fourthCutTraining[,1:32], use="pairwise.complete.obs")
+```
+
+Correlation matrix after cleanup shows a less correlated subset of the input set of predictors:
+
+```{r,echo= FALSE}
+corrplot(correlationMatrixClean, order = "hclust")
+```
+
+We will use 10 fold cross validation for training. This will give us an estimate of the out of bag errors and will also allow us to investigate the importance of predictors. We will use random forest for the statistical learning algorithm. Caret will also try 3 different values of random forest tuning parameter('mtry') for each fold. At the end of the training caret suggests the best parameter for running the the random forest on our data. The best parameter was mtry = 2mode. So in order not to run through multiple parameter settings, we set 'mtry' explicitly using tuneGrid. 
+
+```{r}
+fitControl <- trainControl(method = "repeatedcv",number = 10,repeats = 1, verbose = TRUE)
+modelfit<-train(classe ~.,data=fourthCutTraining, method="rf", trControl = fitControl, tuneGrid = data.frame(.mtry = 2 ), importance = TRUE )
+```
+
+```{r,echo=FALSE}
+modelfit
+```
+
+At this point without further pre-processing of the training data, the results look quite good and we are down to 32 predictors from 160. The gains that could be made by further pre-processing might not be worth the engineering time( further subsetting based on importance ranking, normalizing data, testing for dependent predictors, determining if functions of the predictors might serve as better predictors. 
+
+```{r}
+predictions<-predict(modelfit,newdata=testing)
+truth<- testing[,160]
+mytab = table(predictions, truth)
+confusionMatrix(mytab)  
+```
+
+Still, we could look at variable importance and see if any of the variables are low on the predictor list for all classe.
+
+```{r}
+vI = varImp(modelfit, scale=FALSE)
+```
+
+```{r echo=FALSE}
+plot(vI)
+```
+
+I trained new model on the top 25 predictors, removing the 7 lowest average performers across all classes.
+
+```{r}
+ impData<-data.frame(varImp(modelfit)$importance)
+ keepInd <-row.names(impData[order(-impData$A),][1:25,])
+ keepInd[26] = "classe"
+ fifthCutTraining<- fourthCutTraining[,keepInd]
+ fitControl <- trainControl(method = "repeatedcv",number = 10,repeats = 1, verbose = TRUE)
+ modelfit2<-train(classe ~.,data=fifthCutTraining, method="rf", trControl = fitControl, importance = TRUE)
+ predictions2<-predict(modelfit2,newdata=testing)
+ truth<- testing[,160]
+ mytab2 = table(predictions2, truth)
+
+```
+
+```{r echo=FALSE}
+modelfit2
+confusionMatrix(mytab2)
+```
+
+You can see the the performance was just slightly degraded. At this point it is reasonable to go with the first model.
+I retrained the model following the same steps above on all of the pml-training data and used this model to predict the classifications of the data in pml-testing.
+
+```{r}
+training <-pmlTraining
+firstCutTraining<-training[,-(1:7)]
+nzv = nearZeroVar(firstCutTraining, freqCut = 95/5, uniqueCut = 10, saveMetrics = FALSE)
+secondCutTraining = firstCutTraining[-nzv]
+pctMissing = NULL
+numCols = length(secondCutTraining[1,])
+numRows = length(secondCutTraining[,1])
+for (j in 1:numCols)
+{ 
+  count = 0
+  for (i in 1:length(secondCutTraining[,j]))
+  {
+     count = count + is.na( secondCutTraining[i,j])
+  }
+  pctMissing[j] = count/numRows;
+} 
+thirdCutTraining<-secondCutTraining[, pctMissing <.95]
+numCols = length(thirdCutTraining[1,]) 
+correlationMatrix <- cor(thirdCutTraining[,1:numCols -1], use="pairwise.complete.obs")
+highlyCorrelated <- findCorrelation(correlationMatrix, 0.70)
+fourthCutTraining = thirdCutTraining[-highlyCorrelated]
+dim(fourthCutTraining)
+fitControl <- trainControl(method = "repeatedcv",number = 10,repeats = 1, verbose = TRUE)
+modelfit<-train(classe ~.,data=fourthCutTraining, method="rf", trControl = fitControl, tuneGrid = data.frame(.mtry = 2 ), importance = TRUE )
+```
+
+Statisticss of model used in final prediction:
+```{r}
+modelfit
+```
+
+Predictions made and submitted but not shared:
+
+```{r}
+predictions<-predict(modelfit,newdata=pmlTesting)
+```
+
+The model I created predicted the test set perfectly(20/20)
+
+Sources:
+http://topepo.github.io/caret/index.html -- caret documentation
+www.kaggle.com forum
+A Short Intorduction to the Caret Package. Max Kuhn
+machinelearningmastery.com: Feature Selection with the Caret R Package
+StackExchagne.com
+stackoverflow.com
+coursera.com- machine learning videos (Leek, Roger, Peng, Caffo)
+http://groupware.les.inf.puc-rio.br/ha for training and test data
+www.jstatsoft.org/v28/i05/paper
+I googled constantly for R and caret syntax since I have never used the R language or caret before this project. So there are numerous pages that I visited for command tips and copied and pasted commands.
